@@ -8,6 +8,31 @@
 
 Файл пополняется по мере появления новых технологий в проектах.
 
+## Logging
+
+```python
+# infrastructure/config/logging.py
+from enum import StrEnum
+
+from pydantic import BaseModel
+
+
+class LoggingLevel(StrEnum):
+    DEBUG = "debug"
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
+
+
+class LoggingSettings(BaseModel):
+    level: LoggingLevel = LoggingLevel.INFO
+```
+
+**Типичные поля:** `level` (через `LoggingLevel` StrEnum, значения в нижнем регистре).
+
+**Требование:** уровень логирования всегда задаётся через `StrEnum`, не через `str`. Значения enum — строго нижний регистр.
+
 ## FastAPI / Uvicorn
 
 ```python
@@ -203,6 +228,43 @@ class PostgresSettings(BaseModel):
 **Pool-параметры:** `min_size`, `max_size`, `max_inactive_connection_lifetime`, `max_connection_lifetime`, `timeout`.
 
 **Производные:** `password` (через файл), `url`, `url_with_psycopg` (или с другими драйверами по необходимости).
+
+## SMTP
+
+```python
+# infrastructure/config/smtp.py
+from os import path
+from typing import Self
+
+from pydantic import BaseModel, model_validator
+
+
+class SmtpSettings(BaseModel):
+    host: str = "localhost"
+    port: int = 587
+    username: str = ""
+    password_file: str = "/run/secrets/smtp_password"
+    sender: str = ""
+    use_tls: bool = True
+    timeout: int = 10
+
+    @model_validator(mode="after")
+    def validate_password_file(self) -> Self:
+        if not path.isfile(self.password_file):
+            raise ValueError(f"Password file not found: {self.password_file}")
+        return self
+
+    @property
+    def password(self) -> str:
+        with open(self.password_file, encoding="utf-8") as f:
+            return f.read().strip()
+```
+
+**Типичные поля:** `host`, `port`, `username`, `password_file`, `sender`, `use_tls`, `timeout`.
+
+**Производные:** `password` (через файл, file-based secret).
+
+**Замечания:** `use_tls` используется как флаг для `aiosmtplib`. `sender` — адрес отправителя (`From:`).
 
 ## Subscription Worker
 
