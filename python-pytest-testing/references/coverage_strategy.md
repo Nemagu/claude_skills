@@ -4,6 +4,7 @@
 
 - Используй покрытие как индикатор непроверенных рисков, а не как самоцель.
 - Повышай покрытие в первую очередь в критичном домене и местах прошлых дефектов.
+- Команда может задать ориентиры (например, ≥70% общее, 100% domain) — это цель, а не жёсткий гейт. Не ставь падение CI по проценту покрытия, если такой договорённости нет.
 
 ## Приоритизация
 
@@ -14,28 +15,25 @@
 ## Минимальный цикл проверки
 
 ```bash
-scripts/run_pytest_guard.sh changed
-scripts/run_pytest_guard.sh full
-scripts/run_pytest_guard.sh cov
+uv run pytest                                      # полный прогон
+uv run pytest --cov=src --cov-report=term-missing  # с отчётом покрытия
+uv run pytest src/tests/units                      # быстрый цикл без интеграционных (по директории)
+uv run pytest -m integration                       # только интеграционные
 ```
 
-## Настройка changed-режима
+## Узкий прогон по затронутому коду
+
+Полноценный «changed mode» лежит за пределами скила: используй точечные пути в команде.
 
 ```bash
-CHANGED_BASE=origin/main scripts/run_pytest_guard.sh changed
-CHANGED_INCLUDE_UNTRACKED=0 scripts/run_pytest_guard.sh changed
-CHANGED_FALLBACK=none scripts/run_pytest_guard.sh changed
+uv run pytest src/tests/units/domain/test_project.py
+uv run pytest src/tests/units/domain -k state_transition
 ```
 
-## Альтернативный запуск без guard-скрипта
+> Избегай значений с пробелами в флагах (`-m "not integration"`, `-k "state and edge"`). Это лишние кавычки в каждом вызове и риск сломаться в скриптах.
 
-```bash
-pytest -q
-pytest --cov=src --cov-report=term-missing
-```
-
-## Интерпретация отчета
+## Интерпретация отчёта
 
 - Смотри на строки и ветки, которые не покрыты в высокорисковых модулях.
-- Если покрытие низкое из-за мертвого или транзитного кода, зафиксируй решение: удалить код или добавить тесты.
+- Если покрытие низкое из-за мёртвого или транзитного кода, зафиксируй решение: удалить код или добавить тесты.
 - Не добавляй искусственные тесты без бизнес-ценности только ради процентов.
