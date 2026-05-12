@@ -38,6 +38,10 @@ ln -s ~/dev/claude_skills ~/.claude/skills
 
 Проектирование и правка доменного слоя в Python-проекте по DDD/гексагональной архитектуре. Триггеры — добавление или изменение агрегата, проекции, value object, доменного сервиса, фабрики, абстрактного repository-интерфейса в `domain/`; реализация инвариантов и поведения сущности; работа с версионированием, доменными ошибками и состояниями агрегата.
 
+### `python-gitlab-ci-pipeline`
+
+Создание и правка `.gitlab-ci.yml` для Python-сервисов на uv (DDD/CQRS-бэкенды). Триггеры — добавление/изменение джоб lint, test (unit и integration), build образа; настройка кэша uv, стадий, `workflow.rules`; сборка docker-образа в CI (Kaniko, теги по ветке, registry mirror); подключение отчётов (JUnit, coverage, code quality) и security-гейтов (bandit, pip-audit, trivy). Тесты сам скил не пишет — для этого `python-pytest-testing`.
+
 ### `python-fastapi-background-worker`
 
 Проектирование или реализация background worker в Python-приложении на FastAPI. Триггеры — фоновые задачи через lifecycle startup/shutdown, очереди, конкурентность, retry/idempotency, observability и обязательное использование uvloop как runtime event loop.
