@@ -16,6 +16,7 @@ description: Используй при проектировании или пр�
 7. Composition вложенных блоков — через `Field(default_factory=NestedSettings)`.
 8. Computed values (`url`, `subjects`, derived flags) — `@property`, **не** поля. Чтение secret-файлов — тоже `@property`.
 9. Секреты (пароли, токены, ключи) — **file-based**: поле `<x>_file: str`, `@property <x>` читает файл, `@model_validator(mode="after")` проверяет существование. **Plaintext в YAML — anti-pattern.**
+   - Дефолтные пути файлов **никогда не в `/tmp`** (и `/var/tmp`, `/dev/shm`) — мир-перезаписываемые каталоги. Secret-файлы → `/run/secrets/<name>`; рантайм-файлы, которые процесс пишет (healthcheck-маячки, pid) → писабельная директория под рабочей папкой процесса (`/app/run/<name>`), создаваемая в образе под non-root.
 10. Naming: блоки `<Concern>Settings` / `<Concern><Part>Settings`; top-level — `<WorkerKind>WorkerSettings`.
 11. Поля конкретного блока (имена, типы, дефолты) **определяются с пользователем** — не выдумывай. Если технология типовая (Postgres, NATS, Redis, FastAPI/Uvicorn и т.п.) — проактивно предложи стандартный набор с опорой на `references/tech_examples.md`.
 12. Запрещено: `BaseSettings` во вложенных блоках, env-переменные для отдельных полей помимо `CONFIG_FILE`, plaintext-секреты в YAML, определения top-level воркеров в `__init__.py`.
@@ -200,7 +201,7 @@ API-воркер не знает про NATS; broker-publisher не знает �
 
 1. Спрашивает у пользователя, какие поля нужны.
 2. Если технология типовая (Postgres, NATS, Redis, FastAPI/Uvicorn, RabbitMQ и т.п.) — **проактивно предлагает** стандартный набор полей с опорой на `references/tech_examples.md`.
-3. Не выдумывает поля без согласования; не копирует дефолты слепо без контекста проекта (особенно `host`, `port`, имена пользователей, пути файлов).
+3. Не выдумывает поля без согласования; не копирует дефолты слепо без контекста проекта (особенно `host`, `port`, имена пользователей, пути файлов). Пути файлов в дефолтах не указывает в `/tmp` (см. anti-patterns).
 4. Если технология новая — после согласования полей **добавляет** её в `references/tech_examples.md` для последующих использований.
 
 ## Общий пример блока
@@ -257,6 +258,7 @@ class <Tech>Settings(BaseModel):
 - f-строки для derived URL прямо в полях — только через `@property`.
 - Cross-field логика в `__init__` или фабрике — `@model_validator(mode="after")`.
 - Mutable default напрямую: `pool: <Concern>PoolSettings = <Concern>PoolSettings()` — используем `Field(default_factory=...)`.
+- Дефолтный путь файла в `/tmp` / `/var/tmp` / `/dev/shm` — мир-перезаписываемые каталоги (предсказуемое имя файла → symlink/precreate-атака; bandit `B108` это валит). Secret-файлы → `/run/secrets/<name>`; рантайм-файлы, которые процесс пишет, → писабельная папка под рабочей директорией процесса (`/app/run/<name>`), создаваемая в образе под non-root. Никогда не `/tmp/...`.
 
 ### Naming
 - `<Concern>` без `Settings`-суффикса.

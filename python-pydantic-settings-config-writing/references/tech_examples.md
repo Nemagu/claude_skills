@@ -71,7 +71,7 @@ from pydantic import BaseModel
 class NatsSettings(BaseModel):
     host: str = "localhost"
     port: int = 4222
-    healthcheck_file: str = "/tmp/nats_worker_healthbeat"
+    healthcheck_file: str = "/app/run/nats_worker_healthbeat"
 
     loop_sleep_duration: int = 2
 
@@ -87,6 +87,8 @@ class NatsSettings(BaseModel):
 ```
 
 **Типичные поля:** `host`, `port`, `healthcheck_file`, `loop_sleep_duration`, `connect_name`, `reconnect_time_wait`, `connect_timeout`, `ping_interval`, `max_outstanding_pings`.
+
+> `healthcheck_file` — путь, **куда воркер пишет** liveness-маячок. Дефолт не указывать в `/tmp` (и `/var/tmp`, `/dev/shm`) — это мир-перезаписываемые каталоги. Бери писабельную директорию под рабочей папкой процесса (например `/app/run/`), создаваемую в образе под non-root пользователя. См. anti-patterns в SKILL.md.
 
 ### Per-aggregate stream-настройки (publisher)
 
@@ -274,7 +276,7 @@ from pydantic import BaseModel
 
 
 class SubscriptionSettings(BaseModel):
-    healthcheck_file: str = "/tmp/subscription_worker_healthbeat"
+    healthcheck_file: str = "/app/run/subscription_worker_healthbeat"
     loop_sleep_duration: int = 10
 ```
 
