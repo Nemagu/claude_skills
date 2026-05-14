@@ -37,7 +37,52 @@ class LoggingSettings(BaseModel):
 
 ```python
 # infrastructure/config/fastapi.py
-from pydantic import BaseModel
+import re
+from typing import Self
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class CORSSettings(BaseModel):
+    allow_origins: list[str] = ["*"]
+    allow_origin_regex: str | None = None
+    allow_credentials: bool = False
+    allow_methods: list[str] = ["*"]
+    allow_headers: list[str] = ["*"]
+    expose_headers: list[str] = []
+    max_age: int = Field(default=600, ge=0)
+
+    @field_validator("allow_origin_regex")
+    @classmethod
+    def _validate_origin_regex(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        try:
+            re.compile(value)
+        except re.error as exc:
+            raise ValueError(f"allow_origin_regex is not a valid regex: {exc}") from exc
+        return value
+
+    @model_validator(mode="after")
+    def _forbid_credentials_with_wildcards(self) -> Self:
+        if not self.allow_credentials:
+            return self
+        offenders = [
+            name
+            for name, values in (
+                ("allow_origins", self.allow_origins),
+                ("allow_methods", self.allow_methods),
+                ("allow_headers", self.allow_headers),
+            )
+            if "*" in values
+        ]
+        if offenders:
+            raise ValueError(
+                "allow_credentials=True is incompatible with '*' in: "
+                + ", ".join(offenders)
+                + ". Replace wildcards with explicit values."
+            )
+        return self
 
 
 class FastAPISettings(BaseModel):
@@ -45,6 +90,7 @@ class FastAPISettings(BaseModel):
     request_id_header_name: str = "x-request-id"
     process_time_header_name: str = "x-process-time"
     process_time_ms_header_name: str = "x-process-time-ms"
+    cors: CORSSettings = Field(default_factory=CORSSettings)
 
 
 class UvicornSettings(BaseModel):
@@ -55,7 +101,18 @@ class UvicornSettings(BaseModel):
     loop: str = "uvloop"
 ```
 
-**Типичные поля FastAPI:** имена заголовков для middleware (user-id, request-id, process-time).
+**Типичные поля FastAPI:** имена заголовков для middleware (user-id, request-id, process-time) и вложенный блок `cors: CORSSettings`.
+
+**Типичные поля CORS:** `allow_origins`, `allow_origin_regex`, `allow_credentials`, `allow_methods`, `allow_headers`, `expose_headers`, `max_age` — один-в-один параметры Starlette `CORSMiddleware`.
+
+**Defaults у CORS — позволительные** (`origins/methods/headers=["*"]`, `credentials=False`): подходят для локальной разработки, не требуют объяснения с фронтом «почему запросы режутся». В проде сужают `allow_origins` до конкретного списка. Если фронту нужны cookies или `Authorization` — `allow_credentials: true` плюс **явные** origins/methods/headers (см. валидатор ниже).
+
+**Запрещённые сочетания (валидируются на загрузке конфига):**
+
+- `allow_credentials=True` + `"*"` в `allow_origins`/`allow_methods`/`allow_headers` — по спецификации браузер не примет ответ с `Access-Control-Allow-Origin: *` и `Access-Control-Allow-Credentials: true` одновременно; падаем на старте процесса, а не получаем тихие отказы в рантайме.
+- `allow_origin_regex` должен компилироваться как Python-regex.
+
+**Регистрация мидлвары (presentation, не config):** `CORSMiddleware` подключают через `app.add_middleware(CORSMiddleware, ...)` **последним** — Starlette применяет мидлвары в обратном порядке регистрации, и таким образом CORS оказывается самым внешним и навешивает заголовки даже на 5xx из downstream-обработчиков.
 
 **Типичные поля Uvicorn:** `host`, `port`, `workers`, `reload`, `loop`.
 
