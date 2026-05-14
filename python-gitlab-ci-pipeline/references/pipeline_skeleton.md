@@ -1,6 +1,6 @@
 # Pipeline Skeleton
 
-Эталонный `.gitlab-ci.yml` для Python-сервиса на `uv` со всеми джобами и отчётами. Бери его целиком как стартовую точку и адаптируй: подставь `<service>` (имя БД/пользователя для тестового Postgres), убери `nats` из `services:`, если в проекте нет NATS, поправь пути тестовых директорий под раскладку проекта.
+Эталонный `.gitlab-ci.yml` для Python-сервиса на `uv` со всеми джобами и отчётами. Бери его целиком как стартовую точку и адаптируй: подставь `<service>` (имя БД/пользователя для тестового Postgres), убери `nats` из `services:`, если в проекте нет NATS, поправь пути тестовых директорий под раскладку проекта, согласуй с пользователем значения `timeout:` (помечены как `<согласовано>` — см. раздел «Таймауты» в SKILL.md).
 
 ```yaml
 workflow:
@@ -17,6 +17,7 @@ stages:
 
 default:
   image: python:3.14-slim
+  timeout: <согласовано>   # короткие джобы (lint, unit-tests) живут с этим значением
   before_script:
     - pip install --no-cache-dir --disable-pip-version-check --root-user-action=ignore uv
   cache:
@@ -95,6 +96,7 @@ unit-tests:
 
 integration-tests:
   stage: test
+  timeout: <согласовано>   # длиннее default — поднимаются services: и идёт сетевое взаимодействие
   services:
     - name: postgres:18-alpine
       alias: postgres
@@ -133,6 +135,7 @@ integration-tests:
 
 build-image:
   stage: build
+  timeout: <согласовано>   # учитывает pull базовых образов и push в registry
   image:
     name: gcr.io/kaniko-project/executor:debug
     entrypoint: [""]
@@ -162,6 +165,7 @@ build-image:
 
 container-scan:
   stage: scan
+  timeout: <согласовано>   # скачивание БД уязвимостей + скан образа
   image:
     name: aquasec/trivy:latest
     entrypoint: [""]

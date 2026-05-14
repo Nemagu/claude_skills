@@ -16,7 +16,8 @@ description: Используй при создании или правке .git
 5. Стадия `test`: `unit-tests`, затем `integration-tests` (с `services:` и `INTEGRATION_USE_EXTERNAL_INFRA=1` — сверься с `python-pytest-testing`). Оба отдают JUnit + cobertura.
 6. Стадия `build`: `build-image` на Kaniko — тег `dev` на `develop`, `prod` на `main`, плюс `$CI_COMMIT_SHORT_SHA`; на других ветках не билдим.
 7. Стадия `scan`: `container-scan` (Trivy по собранному образу, gate на HIGH/CRITICAL).
-8. Прогони пайплайн, убедись что отчёты подхватились, зафиксируй DoD.
+8. Согласуй таймауты с пользователем (см. раздел «Таймауты»): один в `default:` и индивидуальные на тяжёлых джобах.
+9. Прогони пайплайн, убедись что отчёты подхватились, зафиксируй DoD.
 
 Готовый эталонный файл целиком — в [pipeline_skeleton.md](references/pipeline_skeleton.md). Бери его как стартовую точку и адаптируй под проект.
 
@@ -38,6 +39,7 @@ description: Используй при создании или правке .git
 ```yaml
 default:
   image: python:3.14-slim
+  timeout: <согласовано>   # см. раздел «Таймауты»; перекрывается per-job для длинных джоб
   before_script:
     - pip install --no-cache-dir --disable-pip-version-check --root-user-action=ignore uv
   cache:
@@ -76,6 +78,33 @@ workflow:
 ```
 
 (паттерн из `users/backend`; строку про теги добавь, если по тегам тоже нужны пайплайны)
+
+## Таймауты
+
+Дефолтный project-level таймаут GitLab — 1 час, и это слишком много для большинства джоб: зависший pytest или Kaniko-build будет жечь раннер впустую, пока кто-то не отменит пайплайн руками. Поэтому всегда задаём явные таймауты: один общий в `default:` и индивидуальный — на джобах, которые заведомо длиннее (как правило, `integration-tests`, `build-image`, `container-scan`).
+
+**Принцип значения:** `timeout` ≈ 2–3× от типичного времени джобы на этом проекте/раннере. Это даёт запас на выбросы (медленный pull базового образа, тормозящий сервис в `services:`), но при реальном зависании джоба падает за минуты, а не за час.
+
+**Конкретные числа в скиле не зашиты.** Они зависят от размера тестовой матрицы, скорости раннера, наличия registry-mirror и т.п. Перед правкой `.gitlab-ci.yml` агент **обязан спросить пользователя** значения хотя бы для:
+
+- `default:` (общий ориентир для коротких джоб — `ruff`, `ruff-format`, `bandit`, `deps-audit`, `unit-tests`);
+- `integration-tests` (поднимает `services:`, идёт по сети);
+- `build-image` (Kaniko, тянет базовые образы, пушит в registry);
+- `container-scan` (Trivy скачивает БД уязвимостей и сканит).
+
+Если у пользователя нет наблюдений по типичному времени джоб — предложи начать с щедрых значений и сузить после первых прогонов, но не выдумывай числа сам.
+
+Синтаксис:
+
+```yaml
+default:
+  timeout: <согласовано с пользователем>   # например, 10m
+
+integration-tests:
+  timeout: <согласовано с пользователем>   # например, 25m
+```
+
+Формат `timeout` — человекочитаемый: `30s`, `5m`, `1h 30m`. Project-level лимит (Settings → CI/CD → Timeout) при этом всё ещё работает как верхняя граница — джоба не может задать `timeout` больше него.
 
 ## Джоба lint
 
@@ -131,6 +160,7 @@ unit-tests:
 
 integration-tests:
   stage: test
+  timeout: <согласовано>   # обычно длиннее default из-за services: и сети
   services:
     - name: postgres:18-alpine
       alias: postgres
@@ -181,6 +211,7 @@ integration-tests:
 ```yaml
 build-image:
   stage: build
+  timeout: <согласовано>   # учитывает pull базовых образов и push в registry
   image:
     name: gcr.io/kaniko-project/executor:debug
     entrypoint: [""]
@@ -229,5 +260,6 @@ build-image:
 - `test`: `unit-tests` и `integration-tests` отдают `reports:junit` и `reports:coverage_report` (cobertura); запуск тестов соответствует `python-pytest-testing`; integration работает в режиме `INTEGRATION_USE_EXTERNAL_INFRA=1`.
 - `build-image`: Kaniko; тег `dev` строго на `develop`, `prod` строго на `main`, плюс `$CI_COMMIT_SHORT_SHA`; на прочих ветках джобы нет; поддержан `KANIKO_REGISTRY_MIRROR`.
 - `container-scan`: Trivy по собранному образу, gate на HIGH/CRITICAL.
+- Задан `timeout:` в `default:` и индивидуально на длинных джобах (`integration-tests`, `build-image`, `container-scan`); конкретные значения согласованы с пользователем, а не выдуманы (см. раздел «Таймауты»).
 - Нет дублирования настроек по джобам; `.yml` валиден (`python -c "import yaml; yaml.safe_load(open('.gitlab-ci.yml'))"` или CI Lint в GitLab).
 - В описании учтено tier-ограничение CE для security-виджетов.
