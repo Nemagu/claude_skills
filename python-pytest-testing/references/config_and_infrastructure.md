@@ -278,6 +278,108 @@ async def clean_db(postgres_settings) -> None:
 
 ---
 
+## Hermetic Streams/Topics in Shared Message Brokers
+
+Имена стримов NATS JetStream, топиков Kafka, очередей/exchange-ей RabbitMQ — это **глобальный неймспейс** в рамках инстанса брокера. Если несколько прогонов тестов (параллельные раннеры одного CI, два MR-пайплайна на одном GitLab Runner с `concurrent > 1`, локальный dev-инстанс) хоть случайно попадут в один и тот же инстанс брокера, хардкоженые имена приведут к гонкам:
+
+- один прогон создаёт стрим с одним набором subject-ов, другой пересоздаёт его с другим;
+- сообщения уходят в «чужой» стрим и не доезжают до подписчика → `TimeoutError` в `next_msg`;
+- `publish` упирается в стрим, удалённый параллельным прогоном → `NoStreamResponseError: no response from stream`;
+- падения «плавающие»: локально 100% зелёное, в CI 9/85 красных.
+
+Даже если кажется, что services контейнеры в CI изолированы — не закладывайся на это на уровне теста. Раннер можно переконфигурировать, инстанс может стать shared, dev может прогнать тесты в общий staging-NATS. Изоляция должна быть на уровне самих тестов.
+
+### Правило
+
+В интеграционных тестах **никогда не хардкодь имена стримов/топиков/очередей**. Каждая тестовая сессия должна работать в собственном неймспейсе, изолированном уникальным per-session суффиксом (тот же `runtime_id`, что используется для tmp-файлов).
+
+### Как изолировать
+
+Если приложение читает настройки из YAML — пробрасывай уникальные имена через `CONFIG_TEMPLATE`. Properties вроде `creation_subject` обычно выводятся из `stream_name` через `@property`, так что subject-ы пересчитаются автоматически.
+
+```python
+runtime_id = uuid7()
+runtime_suffix = runtime_id.hex[:12]
+publisher_stream_name = f"companies_service_{runtime_suffix}"
+consumer_stream_name = f"time_tracker_{runtime_suffix}"
+
+CONFIG_TEMPLATE = """
+nats:
+  host: {nats_host}
+  port: {nats_port}
+
+publishers:
+  company:
+    stream_name: {publisher_stream_name}
+  employee:
+    stream_name: {publisher_stream_name}
+
+consumers:
+  company:
+    stream_name: {consumer_stream_name}
+  employee:
+    stream_name: {consumer_stream_name}
+"""
+```
+
+Имя должно матчить ограничения брокера. Для NATS — `[A-Za-z0-9_-]+`; `runtime_id.hex` подходит без преобразований. Длина суффикса (например, `[:12]`) — компромисс между читаемостью и вероятностью коллизии.
+
+### Анти-паттерн в ассертах
+
+Если в параметризации захардкожен ожидаемый subject — суффикс «протечёт» в тест и сломает его:
+
+```python
+# плохо: completely breaks when stream_name is randomised
+@pytest.mark.parametrize(
+    "event,expected",
+    [
+        (CompanyEvent.CREATED, "companies_service.company.created"),
+        (CompanyEvent.DELETED, "companies_service.company.deleted"),
+    ],
+)
+def test_subject_routing(self, settings, event, expected):
+    assert publisher._subject(event) == expected
+```
+
+Правильный путь — параметризовать по имени атрибута настроек и вычислять expected через `getattr` от того же объекта settings, что попал в SUT:
+
+```python
+@pytest.mark.parametrize(
+    "event,subject_attr",
+    [
+        (CompanyEvent.CREATED, "creation_subject"),
+        (CompanyEvent.DELETED, "deletion_subject"),
+    ],
+)
+def test_subject_routing(self, settings, event, subject_attr):
+    expected = getattr(settings, subject_attr)
+    assert publisher._subject(event) == expected
+```
+
+Тест остаётся параметризованным и читаемым по `ids`, но не завязан на конкретное имя стрима.
+
+### Cleanup
+
+Уникальный per-session суффикс делает прогоны функционально независимыми. Стримы старых прогонов остаются на брокере и со временем накапливаются — это «мусор», а не баг. Если брокер shared надолго (dev/staging), добавь session-finalizer, который удаляет созданные сессией стримы:
+
+```python
+async def _cleanup() -> None:
+    nc = await nats.connect(settings.nats.url)
+    js = nc.jetstream()
+    for name in (publisher_stream_name, consumer_stream_name):
+        try:
+            await js.delete_stream(name)
+        except NotFoundError:
+            pass
+    await nc.drain()
+
+asyncio.run(_cleanup())
+```
+
+Финализатор обязателен, только если стримы реально мешают (квоты, объём диска). Для одноразовых service-контейнеров в CI он не нужен.
+
+---
+
 ## YAML-конфиг приложения для тестов
 
 Если приложение читает настройки из YAML через `CONFIG_FILE`, фикстура создаёт временный конфиг и выставляет переменную окружения:

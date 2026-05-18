@@ -76,6 +76,7 @@ uv run pytest src/tests/units/domain/test_project.py::test_state_transition
 - Выноси общие фикстуры в `conftest.py` только при реальном переиспользовании.
 - Создавай фабрики для агрегатов/команд/DTO, чтобы тест не зависел от лишних полей.
 - Для интеграционной инфраструктуры используй session-scoped фикстуру + autouse function-scoped очистку данных. Подробности — в [config_and_infrastructure.md](references/config_and_infrastructure.md).
+- Если интеграция трогает message broker с глобальным неймспейсом (NATS streams, Kafka topics, RabbitMQ exchanges) — не хардкодь их имена в тестах и фикстурах: рандомизируй per-session суффиксом через config, иначе параллельные прогоны на shared-брокере дают плавающие падения. См. секцию «Hermetic Streams/Topics» в [config_and_infrastructure.md](references/config_and_infrastructure.md).
 - Decision tree: [fixture_and_factory_patterns.md](references/fixture_and_factory_patterns.md).
 
 ### 4. Parameterize Similar Scenarios
@@ -97,6 +98,7 @@ uv run pytest src/tests/units/domain/test_project.py::test_state_transition
 - Фикстуры и фабрики не дублируются между модулями.
 - Интеграционные тесты явно отделены от unit-тестов директорией и маркером `@pytest.mark.integration`.
 - Интеграционные фикстуры корректно работают в двух режимах: локальное поднятие инфраструктуры и `INTEGRATION_USE_EXTERNAL_INFRA=1` (инфра поднята снаружи).
+- Если тесты используют message broker — имена стримов/топиков/очередей уникальны per сессия (per-session суффикс), а ассерты ожидаемых subject-ов выводятся из настроек, а не хардкодятся.
 - Тестовый набор проходит локально через `uv run pytest`; метрики покрытия соответствуют целям команды (порог не обязателен на уровне CI — это ориентир, к которому стремимся).
 
 ## References
