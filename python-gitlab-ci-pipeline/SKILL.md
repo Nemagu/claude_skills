@@ -1,6 +1,6 @@
 ---
 name: python-gitlab-ci-pipeline
-description: Используй при создании или правке .gitlab-ci.yml для Python-сервисов на uv (DDD/CQRS-бэкенды). Триггеры — добавление/изменение джоб lint, test (unit и integration), build образа; настройка кэша uv, стадий, workflow.rules; сборка docker-образа в CI (Kaniko, теги по ветке, registry mirror); подключение отчётов (JUnit, coverage, code quality) и security-гейтов (bandit, pip-audit, trivy); деплой в Docker Swarm через SSH с обновлением существующего стека на сервере (`docker stack deploy` поверх compose на хосте, deploy token для registry, environments и manual-gate для prod). Не применять для написания самих тестов — для этого есть python-pytest-testing.
+description: Используй при создании или правке .gitlab-ci.yml для Python-сервисов на uv (DDD/CQRS-бэкенды). Триггеры — добавление/изменение джоб lint, test (unit и integration), build образа; настройка кэша uv, стадий, workflow.rules; авто-отмена устаревших пайплайнов при новом push'е (`workflow.auto_cancel.on_new_commit` + `interruptible`); сборка docker-образа в CI (Kaniko, теги по ветке, registry mirror); подключение отчётов (JUnit, coverage, code quality) и security-гейтов (bandit, pip-audit, trivy); деплой в Docker Swarm через SSH с обновлением существующего стека на сервере (`docker stack deploy` поверх compose на хосте, deploy token для registry, environments и manual-gate для prod). Не применять для написания самих тестов — для этого есть python-pytest-testing.
 ---
 
 # Python GitLab CI Pipeline
@@ -10,8 +10,8 @@ description: Используй при создании или правке .git
 ## Quick Start
 
 1. Опиши стадии: `lint → test → build → scan → deploy`.
-2. Сделай `workflow.rules` для дедупа пайплайнов branch/MR.
-3. Заведи `default:`-блок: `image: python:3.14-slim` + установка `uv` + кэш по `uv.lock`, и `variables:` с `UV_*`.
+2. Сделай `workflow.rules` для дедупа пайплайнов branch/MR + `workflow.auto_cancel.on_new_commit: interruptible` для отмены устаревших пайплайнов на новый push.
+3. Заведи `default:`-блок: `image: python:3.14-slim` + установка `uv` + кэш по `uv.lock` + `interruptible: true`, и `variables:` с `UV_*`.
 4. Стадия `lint`: `ruff` (+ codequality-отчёт), `ruff-format`, `bandit` (gate), `deps-audit` (gate).
 5. Стадия `test`: `unit-tests`, затем `integration-tests` (с `services:` и `INTEGRATION_USE_EXTERNAL_INFRA=1` — сверься с `python-pytest-testing`). Оба отдают JUnit + cobertura.
 6. Стадия `build`: `build-image` на Kaniko — тег `dev` на `develop`, `prod` на `main`, плюс `$CI_COMMIT_SHORT_SHA`; на других ветках не билдим.
@@ -53,6 +53,7 @@ description: Используй при создании или правке .git
 default:
   image: python:3.14-slim
   timeout: <согласовано>   # см. раздел «Таймауты»; перекрывается per-job для длинных джоб
+  interruptible: true       # см. раздел «Отмена устаревших pipeline'ов»; перекрывается на deploy
   before_script:
     - pip install --no-cache-dir --disable-pip-version-check --root-user-action=ignore uv
   cache:
@@ -78,12 +79,14 @@ variables:
 
 Джобы, которым `uv` не нужен (`build-image` на образе Kaniko, `container-scan` на образе Trivy), переопределяют `image:`, и им обязательно `before_script: []` и `cache: []`, чтобы сбросить `default`.
 
-## workflow.rules
+## workflow
 
-Чтобы не плодить два пайплайна (на push в ветку и на сам MR одновременно):
+Чтобы не плодить два пайплайна (на push в ветку и на сам MR одновременно) и сразу включить авто-отмену устаревших pipeline'ов при новом push'е в ту же ветку:
 
 ```yaml
 workflow:
+  auto_cancel:
+    on_new_commit: interruptible
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS == null
@@ -91,6 +94,42 @@ workflow:
 ```
 
 (паттерн из `users/backend`; строку про теги добавь, если по тегам тоже нужны пайплайны)
+
+Подробнее про `auto_cancel` и взаимодействие с `interruptible:` на джобах — см. раздел «Отмена устаревших pipeline'ов».
+
+## Отмена устаревших pipeline'ов
+
+При push'е поверх ветки, на которой уже идёт pipeline, по умолчанию GitLab продолжает гонять старый pipeline до конца — runner-минуты сжигаются впустую на коде, который уже не актуален. Особенно неприятно для тяжёлых стадий `integration-tests`, `build-image`, `container-scan`. Лечится двумя настройками:
+
+- **`workflow.auto_cancel.on_new_commit: interruptible`** — глобальный режим: при новом push'е в ту же ветку GitLab автоматически отменяет старый pipeline. Альтернативы: `conservative` (default — только pending, running не трогает) и `none` (никогда не отменять).
+- **`interruptible: true` на джобе** — пометка «эту джобу безопасно прерывать». Без неё `auto_cancel.on_new_commit: interruptible` ничего не отменит. По умолчанию GitLab считает все джобы non-interruptible.
+
+Практика: ставим `interruptible: true` в `default:` (применяется ко всем джобам) и явно переопределяем `interruptible: false` только на тех, где прерывание опасно.
+
+### Какие джобы interruptible, какие нет
+
+| Стадия | `interruptible` | Почему |
+|---|---|---|
+| `lint`, `test`, `build`, `scan` | `true` (через default) | Полностью идемпотентны: пересборка с нуля даёт тот же результат; runner-минут на повторе тратится мало; старый pipeline на устаревшем коде ничего ценного не даёт. |
+| `deploy` | **`false`** (override) | `docker stack deploy` стартует rolling update на swarm; SIGTERM CI-джобы в момент апдейта оставит часть сервисов на новом digest, часть — на старом, либо оборвёт docker socket-сессию в неопределённом состоянии. Откатывать такое руками неприятно. Лучше дать deploy-у доехать. |
+
+В YAML это выглядит так:
+
+```yaml
+default:
+  interruptible: true
+
+.deploy:
+  interruptible: false      # переопределяет default для deploy
+```
+
+(полные блоки — в [pipeline_skeleton.md](references/pipeline_skeleton.md))
+
+### Замечания
+
+- `interruptible` действует только при `auto_cancel.on_new_commit: interruptible` — иначе пометка просто игнорируется.
+- Manual-джобы (`when: manual`, как наш `deploy` на `main`) и так не запускаются автоматически — если кто-то ещё не нажал play, новый push отменит весь pipeline целиком вместе с этой manual-джобой как pending; если уже нажал и deploy пошёл — `interruptible: false` защитит его от прерывания.
+- Project-level UI («Auto-cancel redundant pipelines» в Settings → CI/CD → General pipelines) — старая версия того же механизма, работает в режиме `conservative` и не учитывает `interruptible:`. `workflow.auto_cancel` в YAML перекрывает project-level настройку и предпочтительнее, потому что лежит вместе с пайплайном и виден в review.
 
 ## Таймауты
 
@@ -295,6 +334,7 @@ build-image:
 .deploy:
   stage: deploy
   image: alpine:3.23
+  interruptible: false       # см. раздел «Отмена устаревших pipeline'ов»
   before_script:
     - apk add --no-cache openssh-client
     - mkdir -p ~/.ssh
@@ -402,7 +442,8 @@ deploy:
 ## Definition of Done
 
 - Стадии: `lint → test → build → scan`, имя — `lint` (не `check`).
-- Есть `workflow.rules` — нет дублирующихся пайплайнов на branch+MR.
+- Есть `workflow.rules` — нет дублирующихся пайплайнов на branch+MR; есть `workflow.auto_cancel.on_new_commit: interruptible` — устаревшие pipeline'ы отменяются на новый push.
+- `interruptible: true` в `default:`, `interruptible: false` явно на `.deploy` (или каждой deploy-джобе) — pipeline отменяется на новый push, но текущий `docker stack deploy` не прерывается на полпути.
 - `default:` несёт установку `uv` и кэш по `uv.lock`; джобы на чужих образах сбрасывают его (`before_script: []`, `cache: []`).
 - `lint`: `ruff check src` + `ruff format --check src` + codequality-отчёт; `bandit` и `pip-audit` как гейты.
 - `test`: `unit-tests` и `integration-tests` отдают `reports:junit` и `reports:coverage_report` (cobertura); запуск тестов соответствует `python-pytest-testing`; integration работает в режиме `INTEGRATION_USE_EXTERNAL_INFRA=1`.
