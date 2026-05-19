@@ -120,7 +120,7 @@ from domain.errors import DomainError, EntityPolicyError
 def setup_error_handler(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
-        request.state.error_context = {
+        error_context: dict[str, object] = {
             "detail": exc.msg,
             "action": exc.action,
             "struct_name": None,
@@ -129,10 +129,13 @@ def setup_error_handler(app: FastAPI) -> None:
         content = {"detail": exc.msg, "data": exc.data}
         if isinstance(exc, AppInternalError):
             status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+            if exc.wrap_error is not None:
+                error_context["wrap_error"] = str(exc.wrap_error)
         elif isinstance(exc, AppNotFoundError):
             status_code = status.HTTP_404_NOT_FOUND
         else:
             status_code = status.HTTP_400_BAD_REQUEST
+        request.state.error_context = error_context
         return JSONResponse(status_code=status_code, content=jsonable_encoder(content))
 
     @app.exception_handler(DomainError)

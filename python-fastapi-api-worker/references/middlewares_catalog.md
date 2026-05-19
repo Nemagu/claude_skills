@@ -16,7 +16,7 @@ Starlette применяет middleware **в обратном порядке р�
 
 | Слой | Middleware | Видит `request.state` от | Пишет в `request.state` | Заголовки ответа |
 |---|---|---|---|---|
-| 1 (innermost) | `LoggingMiddleware` | `error_context`, `request_id` | — | — |
+| 1 (innermost) | `LoggingMiddleware` | `error_context` (включая `wrap_error` для `AppInternalError`), `request_id` | — | — |
 | 2 | `PerformanceMiddleware` | `request_id` | — | `x-process-time`, `x-process-time-ms` |
 | 3 | `RequestIDMiddleware` | — | `request_id` | `x-request-id` |
 | 4 (outermost) | `CORSMiddleware` | — | — | `access-control-*` |
@@ -84,6 +84,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             "struct_name": error_context.get("struct_name"),
             "detail": error_context.get("detail"),
             "data": error_context.get("data"),
+            "wrap_error": error_context.get("wrap_error"),
         }
 ```
 
@@ -92,6 +93,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 - `BaseException`-ветка нужна для unhandled-крашей до того, как Starlette превратит исключение в 500.
 - `error_context` ставит error handler (`setup_error_handler`); middleware его только читает. Без error handler-а middleware всё равно работает — `error_context` будет пустым словарём.
 - `LoggingMiddleware` — innermost: видит status code ответа уже после error handler-а и подбирает выставленный им контекст.
+- Поле `wrap_error` имеет смысл только для `AppInternalError` (5xx) — там лежит `str(exc.wrap_error)` с исходным инфраструктурным исключением. Для остальных кейсов handler его не выставляет и в логе оно остаётся `None`. Тело ответа `wrap_error` **не содержит** — это поле строго для лога, иначе клиент увидит трассу инфраструктуры.
 
 ## PerformanceMiddleware
 

@@ -140,13 +140,18 @@ app.add_middleware(
 def setup_error_handler(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
-        request.state.error_context = {"detail": exc.msg, "action": exc.action, ...}
+        error_context: dict[str, object] = {
+            "detail": exc.msg, "action": exc.action, ...
+        }
         if isinstance(exc, AppInternalError):
             status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+            if exc.wrap_error is not None:
+                error_context["wrap_error"] = str(exc.wrap_error)
         elif isinstance(exc, AppNotFoundError):
             status_code = status.HTTP_404_NOT_FOUND
         else:
             status_code = status.HTTP_400_BAD_REQUEST
+        request.state.error_context = error_context
         return JSONResponse(status_code=status_code, content=jsonable_encoder({...}))
 
     @app.exception_handler(DomainError)
@@ -156,7 +161,8 @@ def setup_error_handler(app: FastAPI) -> None:
 
 - Хэндлятся два корня иерархий: `AppError` (`application/errors`) и `DomainError` (`domain/errors`). Конкретные подтипы маппятся на HTTP-коды через `isinstance`.
 - Контекст ошибки кладётся в `request.state.error_context` — `LoggingMiddleware` подбирает и пишет в структурный лог. Без этого ошибки уйдут в логи без бизнес-контекста.
-- Тело ответа: `{"detail": ..., "data": ...}`. `jsonable_encoder` — для безопасной сериализации pydantic-моделей внутри `data`.
+- Для `AppInternalError` дополнительно кладётся `wrap_error=str(exc.wrap_error)` (если поле не `None`) — это исходное исключение из инфраструктуры. Без него 5xx-логи показывают только user-facing `detail`, и операторы вынуждены поднимать стэки, чтобы понять root cause. Для клиентских подтипов (`AppNotFoundError`, `AppUnauthorizedError`, `DomainError` и т.п.) `wrap_error` **не выставляется** — там нет инфраструктурного контекста, а если бы и был, не должен утечь в общий лог-контракт.
+- Тело ответа: `{"detail": ..., "data": ...}`. `jsonable_encoder` — для безопасной сериализации pydantic-моделей внутри `data`. `wrap_error` уходит **только в лог**, не в тело ответа — иначе клиент увидит трассу инфраструктуры.
 - В error handler **нет** бизнес-логики, обращений в БД, чтения внешних сервисов: только маппинг исключения в HTTP-ответ.
 
 Полный код — [api_worker_template.md](references/api_worker_template.md).
@@ -441,7 +447,7 @@ match mode:
 - `APIWorker` в `src/presentation/api/server.py` собирает `FastAPI(lifespan=...)`, включает middleware/error-handlers/routers и предоставляет `run()`.
 - Зарегистрированы: `LoggingMiddleware` → `PerformanceMiddleware` → `RequestIDMiddleware` → `CORSMiddleware` (последний — outermost).
 - CORS-параметры читаются из `settings.fastapi.cors.*`, не хардкодятся; `CORSSettings` заведён через [python-pydantic-settings-config-writing] (FastAPI / Uvicorn).
-- `setup_error_handler(app)` маппит подтипы `AppError`/`DomainError` на HTTP-коды и кладёт `request.state.error_context`.
+- `setup_error_handler(app)` маппит подтипы `AppError`/`DomainError` на HTTP-коды и кладёт `request.state.error_context`; для `AppInternalError` контекст дополнен полем `wrap_error` (значение из `exc.wrap_error`), которое в тело ответа не попадает.
 - `APILifespan` инициализирует shared-ресурсы на startup и закрывает на shutdown в обратном порядке; всё попадает в `app.state.*`.
 - `main_router` — единственная точка подключения роутов в `APIWorker`; иерархия подроутеров фиксирует префиксы локально (`/public` → `public/__init__.py`, `/v1` → `v1/__init__.py`, `/<aggregates>` → `<aggregate>.py`).
 - Depends-провайдеры в `dependencies/` читают `request.app.state` для shared-ресурсов и не содержат бизнес-логики; имена заголовков берутся из `FastAPISettings`.
