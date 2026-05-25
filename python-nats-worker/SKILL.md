@@ -100,7 +100,7 @@ src/infrastructure/message_broker/nats/
 - `_events_after_connected()` — default no-op; publisher-наследник переопределяет для создания streams.
 - `NATS_CONNECTION_ERRORS` — кортеж исключений, на которые нужно реконнектиться: `ConnectionClosedError`, `ConnectionDrainingError`, `ConnectionReconnectingError`, `StaleConnectionError`. Экспортируется из модуля для использования в consumer/publisher.
 
-Важно: `_events_after_connected` зовётся **после** каждого успешного `_connect_nats` (включая реконнекты). Если publisher проверяет наличие stream — он это сделает после каждого реконнекта; если действие идемпотентно (как `stream_info → add_stream`), это OK; если нет — защищай флагом.
+Важно: `_events_after_connected` зовётся **после** каждого успешного `_connect_nats` (включая реконнекты). Если publisher проверяет наличие stream — он это сделает после каждого реконнекта; если действие идемпотентно (как `stream_info → add_stream`/`update_stream` с проверкой недостающих subjects), это OK; если нет — защищай флагом.
 
 ## NatsConsumerWorker
 
@@ -243,14 +243,26 @@ async def _create_streams(self) -> None:
         streams_subjects.setdefault(stream_settings.stream_name, []).extend(stream_settings.subjects)
     for stream_name, subjects in streams_subjects.items():
         try:
-            await self._js.stream_info(stream_name)
+            info = await self._js.stream_info(stream_name)
         except NotFoundError:
+            logger.info("creating nats stream: %s", stream_name)
             await self._js.add_stream(config=StreamConfig(name=stream_name, subjects=subjects))
+            continue
+
+        existing = info.config.subjects or []
+        missing = [subject for subject in subjects if subject not in existing]
+        if not missing:
+            continue
+        logger.info("updating nats stream subjects: %s", stream_name)
+        info.config.subjects = existing + missing
+        await self._js.update_stream(config=info.config)
 ```
 
 - Один stream объединяет subjects всех агрегатов с одинаковым `stream_name` (сервисный stream — обычно один на сервис).
-- `stream_info → add_stream` — идемпотентная пара; повторный вызов на реконнект безопасен.
-- Конфигурацию stream (retention, max_msgs, и т.п.) добавляй в `StreamConfig` явно, не оставляй дефолты, если они влияют на семантику.
+- **Создания stream недостаточно — нужно сверять subjects уже существующего stream.** Если stream уже есть, `stream_info` не бросает `NotFoundError`, и при «голом» `stream_info → add_stream` новые subjects (добавленные в конфиг позже — например, при появлении нового агрегата) никогда не доедут до живущего на сервере stream. Тогда `js.publish(subject)` на незарегистрированный subject упрётся в `NoRespondersError`, который JetStream-клиент превращает в `NoStreamResponseError` → ошибка `nats: no response from stream`. Симптом: публикатор «нового» агрегата падает, а старые работают.
+- Поэтому при существующем stream сверяй желаемые subjects с `info.config.subjects` и недостающие добавляй через `js.update_stream`. **Мутируй `info.config`** (полученный от сервера) и дополняй только `subjects`, а не пересоздавай `StreamConfig` с нуля — иначе сбросишь retention/storage/replicas и прочие параметры stream к дефолтам клиента. Список subjects только расширяем (удаление subject с непрочитанными сообщениями сервер и так отклонит).
+- `stream_info → add_stream`/`update_stream` — идемпотентная связка; повторный вызов на реконнект безопасен (на втором проходе `missing` пуст → апдейта нет).
+- Конфигурацию stream (retention, max_msgs, и т.п.) добавляй в `StreamConfig` явно при `add_stream`, не оставляй дефолты, если они влияют на семантику.
 
 ### Publish-loop
 
@@ -354,6 +366,8 @@ match mode:
 - **Ack до завершения handler-а** — обработка ещё может крашнуться, но JetStream уже считает сообщение принятым.
 - **`msg.term()` для временных ошибок** (БД недоступна, related-агрегат ещё не приехал) — теряем сообщение навсегда. TERM только когда ретрай заведомо не поможет.
 - **`msg.nak()` для битого payload** — JetStream будет упорно его доставлять до `max_deliver`. Битый payload → TERM.
+- **`stream_info → add_stream` без сверки subjects существующего stream** — новые subjects, добавленные в конфиг позже, не попадут в уже созданный stream, и `publish` упадёт с `nats: no response from stream`. При существующем stream сверяй и дополняй subjects через `update_stream`.
+- **Пересоздание `StreamConfig` при `update_stream`** вместо мутации `info.config` — сбрасывает retention/storage/replicas и прочие параметры к дефолтам клиента. Бери конфиг от `stream_info` и меняй только `subjects`.
 - **Бизнес-логика в handler-е воркера** (мутации, обращения в БД помимо use case) — handler только распаковывает payload и зовёт use case.
 - **Внешний dedup-сторадж в воркере** до прохода в use case — идемпотентность живёт в use case (через invariants/outbox), не в transport layer.
 - **Reconnect через `max_reconnect_attempts > 0` у NATS-клиента** — конфликтует со своим циклом реконнекта в `_connect_nats`. Используй `max_reconnect_attempts=0` и крути реконнект руками с учётом `_shutdown_event`.
@@ -367,7 +381,7 @@ match mode:
 - `NatsBaseWorker` в `src/presentation/background/nats/base.py` управляет подключением к NATS+DB, держит цикл реконнекта в `_connect_nats` под `_shutdown_event`, экспортирует `NATS_CONNECTION_ERRORS` и `_events_after_connected` как extension point.
 - `NatsConsumerWorker`: `_create_tasks` регистрирует подписки списком `(subject, handler, name)`; `_consume` делает `pull_subscribe → fetch → decode → handler → resolve_response → ack/nak/term`, реконнектится на `NATS_CONNECTION_ERRORS`, пересоздаёт subscription. Payload-схемы — pydantic-модели; `ValidationError` оборачивается в `_InvalidPayloadError`.
 - Классификация исключений в `_resolve_message_response_type` соответствует матрице из [error_classification.md] (битый payload → TERM, временное → NAK, доменная ошибка → TERM).
-- `NatsPublisherWorker`: `_events_after_connected` идемпотентно создаёт streams через `stream_info → add_stream`; `_publish` крутит `heartbeat → handler → sleep`; handler делегирует в `<Aggregate>PublisherUseCase(uow, publisher).execute()`.
+- `NatsPublisherWorker`: `_events_after_connected` идемпотентно создаёт streams через `stream_info → add_stream` **и сверяет subjects существующего stream, дополняя недостающие через `update_stream`** (мутируя `info.config`); `_publish` крутит `heartbeat → handler → sleep`; handler делегирует в `<Aggregate>PublisherUseCase(uow, publisher).execute()`.
 - Idempotency — в use case (invariants/outbox), не в воркере.
 - Entrypoint поднимает loop через `asyncio.Runner(loop_factory=uvloop.new_event_loop)`; режимы `MODE=nats_consumer`/`MODE=nats_publisher` следуют шаблону: settings → миграции → `worker.run()`.
 - `getLogger("nats").setLevel(CRITICAL)` стоит до старта воркера, чтобы не дублировать сетевой шум NATS-клиента.

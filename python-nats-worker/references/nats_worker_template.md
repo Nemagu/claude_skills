@@ -463,12 +463,23 @@ class NatsPublisherWorker(NatsBaseWorker):
             )
         for stream_name, subjects in streams_subjects.items():
             try:
-                await self._js.stream_info(stream_name)
+                info = await self._js.stream_info(stream_name)
             except NotFoundError:
                 logger.info("creating nats stream: %s", stream_name)
                 await self._js.add_stream(
                     config=StreamConfig(name=stream_name, subjects=subjects)
                 )
+                continue
+
+            # stream уже есть — дополняем недостающие subjects, иначе
+            # publish на новый subject упадёт с "no response from stream".
+            existing = info.config.subjects or []
+            missing = [subject for subject in subjects if subject not in existing]
+            if not missing:
+                continue
+            logger.info("updating nats stream subjects: %s", stream_name)
+            info.config.subjects = existing + missing
+            await self._js.update_stream(config=info.config)
 
     def _create_tasks(self) -> None:
         handlers = [
@@ -562,7 +573,7 @@ def main() -> None:
 
 - Замени `<aggregate>` / `<Aggregate>` на реальные имена агрегатов проекта (`company`, `Company`, и т.п.) в payload-моделях, handler-ах, command-ах, use case-ах.
 - На один consumer-воркер обычно несколько subjects (creation/deletion/restoration/...) и несколько агрегатов; добавляй пары в `subjects_handlers` и handler-ы по тому же шаблону.
-- На publisher-воркер — несколько агрегатов, один handler на агрегат. `_create_streams` объединяет subjects по `stream_name`, чтобы публикация всего сервиса жила в одном или нескольких именованных streams.
+- На publisher-воркер — несколько агрегатов, один handler на агрегат. `_create_streams` объединяет subjects по `stream_name`, чтобы публикация всего сервиса жила в одном или нескольких именованных streams. При добавлении нового агрегата/subject в уже задеплоенный сервис `_create_streams` обязан дополнять subjects существующего stream через `update_stream` (см. сверку `info.config.subjects`), иначе публикация нового subject падёт с `nats: no response from stream` — stream был создан до появления subject и его список не обновлялся.
 - Если payload содержит поля помимо id/state/version (timestamps, denormalised data) — расширяй pydantic-модель и `_extract_*_payload`. Главное правило: одна модель на одно сочетание `(subject, payload-schema)`.
 - `_InvalidPayloadError` — оставляй приватным внутри `consumer.py`. Это не application-уровень, его не должны импортировать use case-ы.
 - Если в проекте появится non-NATS background-воркер (как `SubscriptionWorker`) — наследуй его прямо от `BackgroundBaseWorker`, минуя `NatsBaseWorker`; этот шаблон в скиле не описан, но `BackgroundBaseWorker` спроектирован переиспользуемым.
